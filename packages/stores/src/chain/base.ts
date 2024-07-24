@@ -534,7 +534,10 @@ export class ChainStore<C extends ChainInfo = ChainInfo>
   }
 
   getChain(chainId: string): IChainInfoImpl<C> {
-    const chainIdentifier = ChainIdHelper.parse(chainId);
+    const isEVMChainId = !isNaN(parseInt(chainId));
+    const chainIdentifier = ChainIdHelper.parse(
+      isEVMChainId ? `eip155:${chainId}` : chainId
+    );
 
     const chainInfo = this.chainInfoMap.get(chainIdentifier.identifier);
 
