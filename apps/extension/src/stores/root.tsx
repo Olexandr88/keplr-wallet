@@ -9,7 +9,7 @@ import {
   TokenContractListURL,
   GoogleMeasurementId,
   GoogleAPIKeyForMeasurement,
-  SwapVenue,
+  SwapVenues,
   CoinGeckoCoinDataByTokenAddress,
 } from "../config.ui";
 import {
@@ -213,7 +213,7 @@ export class RootStore {
       this.queriesStore.sharedContext,
       this.chainStore,
       this.swapUsageQueries,
-      SwapVenue
+      SwapVenues
     );
 
     this.accountStore = new AccountStore(

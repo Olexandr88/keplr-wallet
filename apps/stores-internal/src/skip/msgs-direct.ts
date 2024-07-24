@@ -150,12 +150,12 @@ export class ObservableQueryMsgsDirectInner extends ObservableQuery<MsgsDirectRe
     public readonly destAssetChainId: string,
     public readonly chainIdsToAddresses: Record<string, string>,
     public readonly slippageTolerancePercent: number,
-    public readonly affiliateFeeBps?: number,
-    public readonly affiliateFeeReceiver?: string,
-    public readonly swapVenue?: {
+    public readonly swapVenues: {
       readonly name: string;
       readonly chainId: string;
-    }
+    }[],
+    public readonly affiliateFeeBps?: number,
+    public readonly affiliateFeeReceiver?: string
   ) {
     super(sharedContext, skipURL, "/v2/fungible/msgs_direct");
 
@@ -446,16 +446,12 @@ export class ObservableQueryMsgsDirectInner extends ObservableQuery<MsgsDirectRe
           ...((isSourceChainEvmOnly || isDestChainEvmOnly) && {
             smart_swap_options: {
               evm_swaps: true,
+              evm_slippage_tolerance_percent:
+                this.slippageTolerancePercent.toString(),
             },
+            allow_unsafe: true,
           }),
-          ...(!isSourceChainEvmOnly &&
-            !isDestChainEvmOnly &&
-            this.swapVenue != null && {
-              swap_venue: {
-                name: this.swapVenue.name,
-                chain_id: this.swapVenue.chainId,
-              },
-            }),
+          swapVenues: this.swapVenues,
         }),
         signal: abortController.signal,
       }
@@ -482,12 +478,9 @@ export class ObservableQueryMsgsDirectInner extends ObservableQuery<MsgsDirectRe
       destAssetChainId: this.destAssetChainId,
       chainIdsToAddresses: this.chainIdsToAddresses,
       slippageTolerancePercent: this.slippageTolerancePercent,
+      swapVenues: this.swapVenues,
       affiliateFeeBps: this.affiliateFeeBps,
       affiliateFeeReceiver: this.affiliateFeeReceiver,
-      swap_venue: this.swapVenue && {
-        name: this.swapVenue.name,
-        chain_id: this.swapVenue.chainId,
-      },
     })}`;
   }
 }
@@ -511,9 +504,9 @@ export class ObservableQueryMsgsDirect extends HasMapStore<ObservableQueryMsgsDi
         parsed.destAssetChainId,
         parsed.chainIdsToAddresses,
         parsed.slippageTolerancePercent,
+        parsed.swapVenues,
         parsed.affiliateFeeBps,
-        parsed.affiliateFeeReceiver,
-        parsed.swapVenue
+        parsed.affiliateFeeReceiver
       );
     });
   }
@@ -525,12 +518,12 @@ export class ObservableQueryMsgsDirect extends HasMapStore<ObservableQueryMsgsDi
     destAssetChainId: string,
     chainIdsToAddresses: Record<string, string>,
     slippageTolerancePercent: number,
-    affiliateFeeBps?: number,
-    affiliateFeeReceiver?: string,
-    swapVenue?: {
+    swapVenues: {
       readonly name: string;
       readonly chainId: string;
-    }
+    }[],
+    affiliateFeeBps?: number,
+    affiliateFeeReceiver?: string
   ): ObservableQueryMsgsDirectInner {
     const amountInCoin = amountIn.toCoin();
     const str = JSON.stringify({
@@ -541,9 +534,9 @@ export class ObservableQueryMsgsDirect extends HasMapStore<ObservableQueryMsgsDi
       destAssetChainId,
       chainIdsToAddresses,
       slippageTolerancePercent,
+      swapVenues,
       affiliateFeeBps,
       affiliateFeeReceiver,
-      swapVenue,
     });
     return this.get(str);
   }
