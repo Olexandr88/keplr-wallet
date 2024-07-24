@@ -4,7 +4,6 @@ import { ObservableQueryAssets } from "./assets";
 import { computed, makeObservable } from "mobx";
 import { ObservableQueryChains } from "./chains";
 import { CoinPretty } from "@keplr-wallet/unit";
-import { ObservableQueryRoute, ObservableQueryRouteInner } from "./route";
 import {
   ObservableQueryMsgsDirect,
   ObservableQueryMsgsDirectInner,
@@ -18,25 +17,23 @@ import { InternalChainStore } from "../internal";
 export class ObservableQueryIBCSwapInner {
   constructor(
     protected readonly chainStore: InternalChainStore,
-    protected readonly queryRoute: ObservableQueryRoute,
     protected readonly queryMsgsDirect: ObservableQueryMsgsDirect,
     public readonly amountInDenom: string,
     public readonly amountInAmount: string,
     public readonly sourceAssetChainId: string,
     public readonly destAssetDenom: string,
     public readonly destAssetChainId: string,
+    public readonly initialChainIdsToAddresses: Record<string, string>,
+    public readonly initialSlippageTolerancePercent: number,
     public readonly affiliateFeeBps: number,
+    public readonly initialAffiliateFeeReceiver: string,
     public readonly swapVenue: {
       readonly name: string;
       readonly chainId: string;
     }
   ) {}
 
-  getQueryMsgsDirect(
-    chainIdsToAddresses: Record<string, string>,
-    slippageTolerancePercent: number,
-    affiliateFeeReceiver: string
-  ): ObservableQueryMsgsDirectInner {
+  getQueryMsgsDirect(): ObservableQueryMsgsDirectInner {
     const inAmount = new CoinPretty(
       this.chainStore
         .getChain(this.sourceAssetChainId)
@@ -49,28 +46,10 @@ export class ObservableQueryIBCSwapInner {
       this.sourceAssetChainId,
       this.destAssetDenom,
       this.destAssetChainId,
-      chainIdsToAddresses,
-      slippageTolerancePercent,
+      this.initialChainIdsToAddresses,
+      this.initialSlippageTolerancePercent,
       this.affiliateFeeBps,
-      affiliateFeeReceiver,
-      this.swapVenue
-    );
-  }
-
-  getQueryRoute(): ObservableQueryRouteInner {
-    const inAmount = new CoinPretty(
-      this.chainStore
-        .getChain(this.sourceAssetChainId)
-        .forceFindCurrency(this.amountInDenom),
-      this.amountInAmount
-    );
-
-    return this.queryRoute.getRoute(
-      this.sourceAssetChainId,
-      inAmount,
-      this.destAssetChainId,
-      this.destAssetDenom,
-      this.affiliateFeeBps,
+      this.initialAffiliateFeeReceiver,
       this.swapVenue
     );
   }
@@ -82,7 +61,6 @@ export class ObservableQueryIbcSwap extends HasMapStore<ObservableQueryIBCSwapIn
     protected readonly queryAssets: ObservableQueryAssets,
     protected readonly queryAssetsFromSource: ObservableQueryAssetsFromSource,
     protected readonly queryChains: ObservableQueryChains,
-    protected readonly queryRoute: ObservableQueryRoute,
     protected readonly queryMsgsDirect: ObservableQueryMsgsDirect,
     protected readonly queryIBCPacketForwardingTransfer: ObservableQueryIbcPfmTransfer,
     public readonly swapVenue: {
@@ -94,14 +72,16 @@ export class ObservableQueryIbcSwap extends HasMapStore<ObservableQueryIBCSwapIn
       const parsed = JSON.parse(str);
       return new ObservableQueryIBCSwapInner(
         this.chainStore,
-        this.queryRoute,
         this.queryMsgsDirect,
         parsed.sourceDenom,
         parsed.sourceAmount,
         parsed.sourceChainId,
         parsed.destDenom,
         parsed.destChainId,
+        parsed.initialChainIdsToAddresses,
+        parsed.initialSlippageTolerancePercent,
         parsed.affiliateFeeBps,
+        parsed.initialAffiliateFeeReceiver,
         parsed.swapVenue
       );
     });
@@ -114,7 +94,10 @@ export class ObservableQueryIbcSwap extends HasMapStore<ObservableQueryIBCSwapIn
     amount: CoinPretty,
     destChainId: string,
     destDenom: string,
-    affiliateFeeBps: number
+    initialChainIdsToAddresses: Record<string, string>,
+    initialSlippageTolerancePercent: number,
+    affiliateFeeBps: number,
+    initialAffiliateFeeReceiver: string
   ): ObservableQueryIBCSwapInner {
     const str = JSON.stringify({
       sourceChainId,
@@ -122,7 +105,10 @@ export class ObservableQueryIbcSwap extends HasMapStore<ObservableQueryIBCSwapIn
       sourceDenom: amount.currency.coinMinimalDenom,
       destChainId,
       destDenom,
+      initialChainIdsToAddresses,
+      initialSlippageTolerancePercent,
       affiliateFeeBps,
+      initialAffiliateFeeReceiver,
       swapVenue: this.swapVenue,
     });
     return this.get(str);

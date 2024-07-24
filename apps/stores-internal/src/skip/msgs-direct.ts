@@ -7,18 +7,122 @@ import {
 import { MsgsDirectResponse } from "./types";
 import { simpleFetch } from "@keplr-wallet/simple-fetch";
 import { computed, makeObservable } from "mobx";
-import { CoinPretty } from "@keplr-wallet/unit";
+import { CoinPretty, Dec, RatePretty } from "@keplr-wallet/unit";
 import Joi from "joi";
 import { DenomHelper } from "@keplr-wallet/common";
 
 const Schema = Joi.object<MsgsDirectResponse>({
+  route: Joi.object({
+    source_asset_denom: Joi.string().required(),
+    source_asset_chain_id: Joi.string().required(),
+    dest_asset_denom: Joi.string().required(),
+    dest_asset_chain_id: Joi.string().required(),
+    amount_in: Joi.string().required(),
+    amount_out: Joi.string().required(),
+    operations: Joi.array()
+      .items(
+        Joi.object({
+          swap: Joi.object({
+            swap_in: Joi.object({
+              swap_venue: Joi.object({
+                name: Joi.string().required(),
+                chain_id: Joi.string().required(),
+              })
+                .unknown(true)
+                .required(),
+              swap_operations: Joi.array()
+                .items(
+                  Joi.object({
+                    pool: Joi.string().required(),
+                    denom_in: Joi.string().required(),
+                    denom_out: Joi.string().required(),
+                  }).unknown(true)
+                )
+                .required(),
+              swap_amount_in: Joi.string().required(),
+              price_impact_percent: Joi.string(),
+            }).unknown(true),
+            estimated_affiliate_fee: Joi.string().required(),
+          })
+            .required()
+            .unknown(true),
+        }).unknown(true),
+        Joi.object({
+          transfer: Joi.object({
+            port: Joi.string().required(),
+            channel: Joi.string().required(),
+            chain_id: Joi.string().required(),
+            pfm_enabled: Joi.boolean(),
+            dest_denom: Joi.string().required(),
+            supports_memo: Joi.boolean(),
+          })
+            .required()
+            .unknown(true),
+        }).unknown(true),
+        Joi.object({
+          axelar_transfer: Joi.object({
+            asset: Joi.string(),
+            bridge_id: Joi.string(),
+            denom_in: Joi.string(),
+            denom_out: Joi.string(),
+            from_chain: Joi.string(),
+            from_chain_id: Joi.string(),
+            to_chain: Joi.string(),
+            to_chain_id: Joi.string(),
+            fee_amount: Joi.string(),
+            fee_asset: Joi.object({
+              chain_id: Joi.string(),
+              denom: Joi.string(),
+              decimals: Joi.number(),
+              symbol: Joi.string(),
+            }).unknown(true),
+          })
+            .required()
+            .unknown(true),
+        }).unknown(true),
+        Joi.object({
+          evm_swap: Joi.object({
+            amount_in: Joi.string(),
+            amount_out: Joi.string(),
+            denom_in: Joi.string(),
+            denom_out: Joi.string(),
+            from_chain_id: Joi.string(),
+          })
+            .required()
+            .unknown(true),
+        }).unknown(true),
+        Joi.object({
+          cctp_transfer: Joi.object({
+            bridge_id: Joi.string().required(),
+            denom_in: Joi.string().required(),
+            denom_out: Joi.string().required(),
+            from_chain_id: Joi.string().required(),
+            to_chain_id: Joi.string().required(),
+          })
+            .required()
+            .unknown(true),
+        }).unknown(true)
+      )
+      .required(),
+    chain_ids: Joi.array().items(Joi.string()).required(),
+    does_swap: Joi.boolean(),
+    estimated_amount_out: Joi.string(),
+    swap_venue: Joi.object({
+      name: Joi.string().required(),
+      chain_id: Joi.string().required(),
+    }).unknown(true),
+    swap_price_impact_percent: Joi.string(),
+    txs_required: Joi.number().required(),
+  }).unknown(true),
   msgs: Joi.array()
     .items(
       Joi.object({
-        chain_id: Joi.string().required(),
-        path: Joi.array().items(Joi.string()).required(),
-        msg: Joi.string().required(),
-        msg_type_url: Joi.string().required(),
+        multi_chain_msg: Joi.object({
+          chain_id: Joi.string().required(),
+          path: Joi.array().items(Joi.string()).required(),
+          msg: Joi.string().required(),
+          msg_type_url: Joi.string().required(),
+        }).unknown(true),
       }).unknown(true),
       Joi.object({
         evm_tx: Joi.object({
@@ -46,9 +150,9 @@ export class ObservableQueryMsgsDirectInner extends ObservableQuery<MsgsDirectRe
     public readonly destAssetChainId: string,
     public readonly chainIdsToAddresses: Record<string, string>,
     public readonly slippageTolerancePercent: number,
-    public readonly affiliateFeeBps: number,
-    public readonly affiliateFeeReceiver: string,
-    public readonly swapVenue: {
+    public readonly affiliateFeeBps?: number,
+    public readonly affiliateFeeReceiver?: string,
+    public readonly swapVenue?: {
       readonly name: string;
       readonly chainId: string;
     }
@@ -56,6 +160,89 @@ export class ObservableQueryMsgsDirectInner extends ObservableQuery<MsgsDirectRe
     super(sharedContext, skipURL, "/v2/fungible/msgs_direct");
 
     makeObservable(this);
+  }
+
+  protected override canFetch(): boolean {
+    if (!this.amountInAmount || this.amountInAmount === "0") {
+      return false;
+    }
+    return super.canFetch();
+  }
+
+  @computed
+  get outAmount(): CoinPretty {
+    if (!this.response) {
+      return new CoinPretty(
+        this.chainGetter
+          .getChain(this.destAssetChainId)
+          .forceFindCurrency(this.destAssetDenom),
+        "0"
+      );
+    }
+
+    return new CoinPretty(
+      this.chainGetter
+        .getChain(this.destAssetChainId)
+        .forceFindCurrency(this.destAssetDenom),
+      this.response.data.route.amount_out
+    );
+  }
+
+  @computed
+  get swapFee(): CoinPretty[] {
+    if (!this.response) {
+      return [
+        new CoinPretty(
+          this.chainGetter
+            .getChain(this.destAssetChainId)
+            .forceFindCurrency(this.destAssetDenom),
+          "0"
+        ),
+      ];
+    }
+
+    const estimatedAffiliateFees: {
+      fee: string;
+      venueChainId: string;
+    }[] = [];
+    for (const operation of this.response.data.route.operations) {
+      if ("swap" in operation) {
+        estimatedAffiliateFees.push({
+          fee: operation.swap.estimated_affiliate_fee,
+          // QUESTION: swap_out이 생기면...?
+          venueChainId: operation.swap.swap_in.swap_venue.chain_id,
+        });
+      }
+    }
+
+    return estimatedAffiliateFees.map(({ fee, venueChainId }) => {
+      const split = fee.split(/^([0-9]+)(\s)*([a-zA-Z][a-zA-Z0-9/-]*)$/);
+
+      if (split.length !== 5) {
+        throw new Error(`Invalid fee format: ${fee}`);
+      }
+
+      const amount = split[1];
+      const denom = split[3];
+
+      return new CoinPretty(
+        this.chainGetter.getChain(venueChainId).forceFindCurrency(denom),
+        amount
+      );
+    });
+  }
+
+  @computed
+  get swapPriceImpact(): RatePretty | undefined {
+    if (!this.response || !this.response.data.route.swap_price_impact_percent) {
+      return undefined;
+    }
+
+    return new RatePretty(
+      new Dec(this.response.data.route.swap_price_impact_percent).quoTruncate(
+        new Dec(100)
+      )
+    );
   }
 
   @computed
@@ -108,21 +295,26 @@ export class ObservableQueryMsgsDirectInner extends ObservableQuery<MsgsDirectRe
       };
     } else {
       if (
-        msg.msg_type_url !== "/ibc.applications.transfer.v1.MsgTransfer" &&
-        msg.msg_type_url !== "/cosmwasm.wasm.v1.MsgExecuteContract"
+        msg.multi_chain_msg.msg_type_url !==
+          "/ibc.applications.transfer.v1.MsgTransfer" &&
+        msg.multi_chain_msg.msg_type_url !==
+          "/cosmwasm.wasm.v1.MsgExecuteContract"
       ) {
         return;
       }
 
-      const chainMsg = JSON.parse(msg.msg);
-      if (msg.msg_type_url === "/cosmwasm.wasm.v1.MsgExecuteContract") {
+      const chainMsg = JSON.parse(msg.multi_chain_msg.msg);
+      if (
+        msg.multi_chain_msg.msg_type_url ===
+        "/cosmwasm.wasm.v1.MsgExecuteContract"
+      ) {
         return {
           type: "MsgExecuteContract",
           funds: chainMsg.funds.map(
             (fund: { denom: string; amount: string }) => {
               return new CoinPretty(
                 this.chainGetter
-                  .getChain(msg.chain_id)
+                  .getChain(msg.multi_chain_msg.chain_id)
                   .forceFindCurrency(fund.denom),
                 fund.amount
               );
@@ -132,9 +324,10 @@ export class ObservableQueryMsgsDirectInner extends ObservableQuery<MsgsDirectRe
           msg: chainMsg.msg,
         };
       } else if (
-        msg.msg_type_url === "/ibc.applications.transfer.v1.MsgTransfer"
+        msg.multi_chain_msg.msg_type_url ===
+        "/ibc.applications.transfer.v1.MsgTransfer"
       ) {
-        if (msg.path.length < 2) {
+        if (msg.multi_chain_msg.path.length < 2) {
           return;
         }
 
@@ -143,11 +336,11 @@ export class ObservableQueryMsgsDirectInner extends ObservableQuery<MsgsDirectRe
           receiver: chainMsg.receiver,
           sourcePort: chainMsg.source_port,
           sourceChannel: chainMsg.source_channel,
-          counterpartyChainId: msg.path[1],
+          counterpartyChainId: msg.multi_chain_msg.path[1],
           timeoutTimestamp: chainMsg.timeout_timestamp,
           token: new CoinPretty(
             this.chainGetter
-              .getChain(msg.chain_id)
+              .getChain(msg.multi_chain_msg.chain_id)
               .forceFindCurrency(chainMsg.token.denom),
             chainMsg.token.amount
           ),
@@ -242,7 +435,7 @@ export class ObservableQueryMsgsDirectInner extends ObservableQuery<MsgsDirectRe
           chain_ids_to_addresses: this.chainIdsToAddresses,
           slippage_tolerance_percent: this.slippageTolerancePercent.toString(),
           affiliates:
-            this.affiliateFeeBps > 0
+            this.affiliateFeeBps && this.affiliateFeeBps > 0
               ? [
                   {
                     basis_points_fee: this.affiliateFeeBps.toString(),
@@ -291,7 +484,7 @@ export class ObservableQueryMsgsDirectInner extends ObservableQuery<MsgsDirectRe
       slippageTolerancePercent: this.slippageTolerancePercent,
       affiliateFeeBps: this.affiliateFeeBps,
       affiliateFeeReceiver: this.affiliateFeeReceiver,
-      swap_venue: {
+      swap_venue: this.swapVenue && {
         name: this.swapVenue.name,
         chain_id: this.swapVenue.chainId,
       },
@@ -332,9 +525,9 @@ export class ObservableQueryMsgsDirect extends HasMapStore<ObservableQueryMsgsDi
     destAssetChainId: string,
     chainIdsToAddresses: Record<string, string>,
     slippageTolerancePercent: number,
-    affiliateFeeBps: number,
-    affiliateFeeReceiver: string,
-    swapVenue: {
+    affiliateFeeBps?: number,
+    affiliateFeeReceiver?: string,
+    swapVenue?: {
       readonly name: string;
       readonly chainId: string;
     }

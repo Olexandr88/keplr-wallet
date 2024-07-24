@@ -1,7 +1,6 @@
 import { QuerySharedContext } from "@keplr-wallet/stores";
 import { DeepReadonly } from "utility-types";
 import { ObservableQueryAssetsFromSource } from "./assets-from-source";
-import { ObservableQueryRoute } from "./route";
 import { ObservableQueryChains } from "./chains";
 import { ObservableQueryIbcPfmTransfer } from "./ibc-pfm-transfer";
 import { ObservableQueryAssets } from "./assets";
@@ -14,8 +13,6 @@ export class SkipQueries {
   public readonly queryChains: DeepReadonly<ObservableQueryChains>;
   public readonly queryAssets: DeepReadonly<ObservableQueryAssets>;
   public readonly queryAssetsFromSource: DeepReadonly<ObservableQueryAssetsFromSource>;
-  public readonly queryRoute: DeepReadonly<ObservableQueryRoute>;
-
   public readonly queryMsgsDirect: DeepReadonly<ObservableQueryMsgsDirect>;
 
   public readonly queryIBCPacketForwardingTransfer: DeepReadonly<ObservableQueryIbcPfmTransfer>;
@@ -46,12 +43,6 @@ export class SkipQueries {
       chainStore,
       "https://api.skip.money"
     );
-    this.queryRoute = new ObservableQueryRoute(
-      sharedContext,
-      chainStore,
-      "https://api.skip.money"
-    );
-
     this.queryMsgsDirect = new ObservableQueryMsgsDirect(
       sharedContext,
       chainStore,
@@ -68,7 +59,6 @@ export class SkipQueries {
       this.queryAssets,
       this.queryAssetsFromSource,
       this.queryChains,
-      this.queryRoute,
       this.queryMsgsDirect,
       this.queryIBCPacketForwardingTransfer,
       swapVenue

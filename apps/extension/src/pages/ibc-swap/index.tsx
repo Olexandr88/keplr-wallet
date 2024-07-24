@@ -125,7 +125,9 @@ export const IBCSwapPage: FunctionComponent = observer(() => {
     200000,
     outChainId,
     outCurrency,
-    SwapFeeBps.value
+    uiConfigStore.ibcSwapConfig.slippageNum,
+    SwapFeeBps.value,
+    SwapFeeBps.receiver
   );
 
   ibcSwapConfigs.amountConfig.setCurrency(inCurrency);
@@ -156,12 +158,13 @@ export const IBCSwapPage: FunctionComponent = observer(() => {
         type = `swap-1`;
       }
 
-      const queryRoute = ibcSwapConfigs.amountConfig
+      const queryMsgsDirect = ibcSwapConfigs.amountConfig
         .getQueryIBCSwap()
-        ?.getQueryRoute();
-      if (queryRoute && queryRoute.response) {
-        if (queryRoute.response.data.operations.length > 0) {
-          const firstOperation = queryRoute.response.data.operations[0];
+        ?.getQueryMsgsDirect();
+      if (queryMsgsDirect && queryMsgsDirect.response) {
+        if (queryMsgsDirect.response.data.route.operations.length > 0) {
+          const firstOperation =
+            queryMsgsDirect.response.data.route.operations[0];
           if ("swap" in firstOperation) {
             if ("swap_in" in firstOperation.swap) {
               type = `swap-${firstOperation.swap.swap_in.swap_operations.length}`;
@@ -188,11 +191,7 @@ export const IBCSwapPage: FunctionComponent = observer(() => {
         throw new Error("Not ready to simulate tx");
       }
 
-      const tx = ibcSwapConfigs.amountConfig.getTxIfReady(
-        // simulation 자체는 쉽게 통과시키기 위해서 슬리피지를 50으로 설정한다.
-        50,
-        SwapFeeBps.receiver
-      );
+      const tx = ibcSwapConfigs.amountConfig.getTxIfReady();
       if (!tx) {
         throw new Error("Not ready to simulate tx");
       }
@@ -258,7 +257,7 @@ export const IBCSwapPage: FunctionComponent = observer(() => {
 
   // 10초마다 자동 refresh
   const queryIBCSwap = ibcSwapConfigs.amountConfig.getQueryIBCSwap();
-  const queryRoute = queryIBCSwap?.getQueryRoute();
+  const queryRoute = queryIBCSwap?.getQueryMsgsDirect();
   useEffect(() => {
     if (queryRoute && !queryRoute.isFetching) {
       const timeoutId = setTimeout(() => {
@@ -315,9 +314,10 @@ export const IBCSwapPage: FunctionComponent = observer(() => {
   // ------
 
   useEffect(() => {
-    const axelarTransferOperation = queryRoute?.response?.data.operations.find(
-      (operation) => "axelar_transfer" in operation
-    );
+    const axelarTransferOperation =
+      queryRoute?.response?.data.route.operations.find(
+        (operation) => "axelar_transfer" in operation
+      );
 
     // Adds additional transfer fee if there is an axelar_transfer operation.
     if (
@@ -328,7 +328,7 @@ export const IBCSwapPage: FunctionComponent = observer(() => {
         new Dec(axelarTransferOperation.axelar_transfer.fee_amount)
       );
     }
-  }, [ibcSwapConfigs.feeConfig, queryRoute?.response?.data.operations]);
+  }, [ibcSwapConfigs.feeConfig, queryRoute?.response?.data.route.operations]);
 
   const [isHighPriceImpact, setIsHighPriceImpact] = useState(false);
   useEffectOnce(() => {
@@ -513,9 +513,9 @@ export const IBCSwapPage: FunctionComponent = observer(() => {
                 data: string;
               };
 
-          const queryRoute = ibcSwapConfigs.amountConfig
+          const queryMsgsDirect = ibcSwapConfigs.amountConfig
             .getQueryIBCSwap()!
-            .getQueryRoute();
+            .getQueryMsgsDirect();
           const channels: {
             portId: string;
             channelId: string;
@@ -526,16 +526,14 @@ export const IBCSwapPage: FunctionComponent = observer(() => {
 
           try {
             let priorOutAmount: Int | undefined = undefined;
-            if (queryRoute.response) {
-              priorOutAmount = new Int(queryRoute.response.data.amount_out);
+            if (queryMsgsDirect.response) {
+              priorOutAmount = new Int(
+                queryMsgsDirect.response.data.route.amount_out
+              );
             }
 
             const [_tx] = await Promise.all([
-              ibcSwapConfigs.amountConfig.getTx(
-                uiConfigStore.ibcSwapConfig.slippageNum,
-                SwapFeeBps.receiver,
-                priorOutAmount
-              ),
+              ibcSwapConfigs.amountConfig.getTx(priorOutAmount),
               // queryRoute는 ibc history를 추적하기 위한 채널 정보 등을 얻기 위해서 사용된다.
               // /msgs_direct로도 얻을 순 있지만 따로 데이터를 해석해야되기 때문에 좀 힘들다...
               // 엄밀히 말하면 각각의 엔드포인트이기 때문에 약간의 시간차 등으로 서로 일치하지 않는 값이 올수도 있다.
@@ -545,10 +543,11 @@ export const IBCSwapPage: FunctionComponent = observer(() => {
               // 굳이 중복할 필요가 없어짐
             ]);
 
-            if (!queryRoute.response) {
-              throw new Error("queryRoute.response is undefined");
+            if (!queryMsgsDirect.response) {
+              throw new Error("queryMsgsDirect.response is undefined");
             }
-            for (const operation of queryRoute.response.data.operations) {
+            for (const operation of queryMsgsDirect.response.data.route
+              .operations) {
               if ("transfer" in operation) {
                 const queryClientState = queriesStore
                   .get(operation.transfer.chain_id)
@@ -1331,7 +1330,9 @@ const WarningGuideBox: FunctionComponent<{
       return err.message || err.toString();
     }
 
-    const queryError = amountConfig.getQueryIBCSwap()?.getQueryRoute()?.error;
+    const queryError = amountConfig
+      .getQueryIBCSwap()
+      ?.getQueryMsgsDirect()?.error;
     if (queryError) {
       return queryError.message || queryError.toString();
     }
