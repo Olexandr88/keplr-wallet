@@ -22,6 +22,8 @@ export interface AssetsResponse {
             chain_id: string;
             origin_denom: string;
             origin_chain_id: string;
+            is_evm: boolean;
+            token_contract?: string;
           }[];
         }
       | undefined;
@@ -29,12 +31,25 @@ export interface AssetsResponse {
 }
 
 export interface MsgsDirectResponse {
-  msgs: {
-    chain_id: string;
-    path: string[];
-    msg: string;
-    msg_type_url: string;
-  }[];
+  msgs:
+    | (
+        | {
+            chain_id: string;
+            path: string[];
+            msg: string;
+            msg_type_url: string;
+          }
+        | {
+            evm_tx: {
+              chain_id: string;
+              data: string;
+              required_erc20_approvals: string[];
+              signer_address: string;
+              to: string;
+              value: string;
+            };
+          }
+      )[];
   route: RouteResponse;
 }
 
@@ -72,6 +87,25 @@ export interface RouteResponse {
             price_impact_percent?: string;
           };
           estimated_affiliate_fee: string;
+        };
+      }
+    | {
+        axelar_transfer: {
+          asset: string;
+          bridge_id: string;
+          denom_in: string;
+          denom_out: string;
+          from_chain: string;
+          from_chain_id: string;
+          to_chain: string;
+          to_chain_id: string;
+          fee_amount: string;
+          fee_asset: {
+            chain_id: string;
+            denom: string;
+            decimals: number;
+            symbol: string;
+          };
         };
       }
   )[];

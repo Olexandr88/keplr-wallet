@@ -50,12 +50,14 @@ import { BACKGROUND_PORT, Message } from "@keplr-wallet/router";
 import { ChainIdHelper } from "@keplr-wallet/cosmos";
 import { useEffectOnce } from "../../hooks/use-effect-once";
 import { amountToAmbiguousAverage, amountToAmbiguousString } from "../../utils";
+import { EthTxStatus } from "@keplr-wallet/types";
 
 export const IBCSwapPage: FunctionComponent = observer(() => {
   const {
     chainStore,
     queriesStore,
     accountStore,
+    ethereumAccountStore,
     skipQueriesStore,
     uiConfigStore,
     keyRingStore,
@@ -107,13 +109,18 @@ export const IBCSwapPage: FunctionComponent = observer(() => {
   })();
   // ----
 
+  const account = accountStore.getAccount(inChainId);
+
   const ibcSwapConfigs = useIBCSwapConfig(
     chainStore,
     queriesStore,
     accountStore,
+    ethereumAccountStore,
     skipQueriesStore,
     inChainId,
-    accountStore.getAccount(inChainId).bech32Address,
+    chainStore.isEvmOnlyChain(inChainId)
+      ? account.ethereumHexAddress
+      : account.bech32Address,
     // TODO: config로 빼기
     200000,
     outChainId,
@@ -307,6 +314,22 @@ export const IBCSwapPage: FunctionComponent = observer(() => {
   ]);
   // ------
 
+  useEffect(() => {
+    const axelarTransferOperation = queryRoute?.response?.data.operations.find(
+      (operation) => "axelar_transfer" in operation
+    );
+
+    // Adds additional transfer fee if there is an axelar_transfer operation.
+    if (
+      axelarTransferOperation != null &&
+      "axelar_transfer" in axelarTransferOperation
+    ) {
+      ibcSwapConfigs.feeConfig.setL1DataFee(
+        new Dec(axelarTransferOperation.axelar_transfer.fee_amount)
+      );
+    }
+  }, [ibcSwapConfigs.feeConfig, queryRoute?.response?.data.operations]);
+
   const [isHighPriceImpact, setIsHighPriceImpact] = useState(false);
   useEffectOnce(() => {
     const disposal = autorun(() => {
@@ -481,7 +504,14 @@ export const IBCSwapPage: FunctionComponent = observer(() => {
         if (!interactionBlocked) {
           setIsTxLoading(true);
 
-          let tx: MakeTxResponse;
+          let tx:
+            | MakeTxResponse
+            | {
+                chainId: number;
+                to: string;
+                value: string;
+                data: string;
+              };
 
           const queryRoute = ibcSwapConfigs.amountConfig
             .getQueryIBCSwap()!
@@ -544,6 +574,8 @@ export const IBCSwapPage: FunctionComponent = observer(() => {
                 });
               } else if ("swap" in operation) {
                 swapChannelIndex = channels.length - 1;
+              } else if ("axelar_transfer" in operation) {
+                // TODO
               }
             }
 
@@ -556,10 +588,19 @@ export const IBCSwapPage: FunctionComponent = observer(() => {
               if (receiverAccount.walletStatus !== WalletStatus.Loaded) {
                 await receiverAccount.init();
               }
-              if (!receiverAccount.bech32Address) {
-                throw new Error("receiverAccount.bech32Address is undefined");
+              if (chainStore.isEvmOnlyChain(receiverChainId)) {
+                if (!receiverAccount.ethereumHexAddress) {
+                  throw new Error(
+                    "receiverAccount.ethereumHexAddress is undefined"
+                  );
+                }
+                swapReceiver.push(receiverAccount.ethereumHexAddress);
+              } else {
+                if (!receiverAccount.bech32Address) {
+                  throw new Error("receiverAccount.bech32Address is undefined");
+                }
+                swapReceiver.push(receiverAccount.bech32Address);
               }
-              swapReceiver.push(receiverAccount.bech32Address);
             }
 
             tx = _tx;
@@ -571,240 +612,429 @@ export const IBCSwapPage: FunctionComponent = observer(() => {
           setCalculatingTxError(undefined);
 
           try {
-            await tx.send(
-              ibcSwapConfigs.feeConfig.toStdFee(),
-              ibcSwapConfigs.memoConfig.memo,
-              {
-                preferNoSetFee: true,
-                preferNoSetMemo: false,
+            if ("send" in tx) {
+              await tx.send(
+                ibcSwapConfigs.feeConfig.toStdFee(),
+                ibcSwapConfigs.memoConfig.memo,
+                {
+                  preferNoSetFee: true,
+                  preferNoSetMemo: false,
 
-                sendTx: async (chainId, tx, mode) => {
-                  if (ibcSwapConfigs.amountConfig.type === "transfer") {
-                    const msg: Message<Uint8Array> = new SendTxAndRecordMsg(
-                      "ibc-swap/ibc-transfer",
-                      chainId,
-                      outChainId,
-                      tx,
-                      mode,
-                      false,
-                      ibcSwapConfigs.senderConfig.sender,
-                      accountStore.getAccount(outChainId).bech32Address,
-                      ibcSwapConfigs.amountConfig.amount.map((amount) => {
-                        return {
-                          amount: DecUtils.getTenExponentN(
-                            amount.currency.coinDecimals
-                          )
-                            .mul(amount.toDec())
-                            .toString(),
-                          denom: amount.currency.coinMinimalDenom,
-                        };
-                      }),
-                      ibcSwapConfigs.memoConfig.memo
-                    ).withIBCPacketForwarding(channels, {
-                      currencies: chainStore.getChain(chainId).currencies,
-                    });
-                    return await new InExtensionMessageRequester().sendMessage(
-                      BACKGROUND_PORT,
-                      msg
-                    );
-                  } else {
-                    const msg = new SendTxAndRecordWithIBCSwapMsg(
-                      "amount-in",
-                      chainId,
-                      outChainId,
-                      tx,
-                      channels,
-                      {
-                        chainId: outChainId,
-                        denom: outCurrency.coinMinimalDenom,
-                      },
-                      swapChannelIndex,
-                      swapReceiver,
-                      mode,
-                      false,
-                      ibcSwapConfigs.senderConfig.sender,
-                      ibcSwapConfigs.amountConfig.amount.map((amount) => {
-                        return {
-                          amount: DecUtils.getTenExponentN(
-                            amount.currency.coinDecimals
-                          )
-                            .mul(amount.toDec())
-                            .toString(),
-                          denom: amount.currency.coinMinimalDenom,
-                        };
-                      }),
-                      ibcSwapConfigs.memoConfig.memo,
-                      {
-                        currencies: chainStore.getChain(outChainId).currencies,
-                      }
-                    );
+                  sendTx: async (chainId, tx, mode) => {
+                    if (ibcSwapConfigs.amountConfig.type === "transfer") {
+                      const msg: Message<Uint8Array> = new SendTxAndRecordMsg(
+                        "ibc-swap/ibc-transfer",
+                        chainId,
+                        outChainId,
+                        tx,
+                        mode,
+                        false,
+                        ibcSwapConfigs.senderConfig.sender,
+                        accountStore.getAccount(outChainId).bech32Address,
+                        ibcSwapConfigs.amountConfig.amount.map((amount) => {
+                          return {
+                            amount: DecUtils.getTenExponentN(
+                              amount.currency.coinDecimals
+                            )
+                              .mul(amount.toDec())
+                              .toString(),
+                            denom: amount.currency.coinMinimalDenom,
+                          };
+                        }),
+                        ibcSwapConfigs.memoConfig.memo
+                      ).withIBCPacketForwarding(channels, {
+                        currencies: chainStore.getChain(chainId).currencies,
+                      });
+                      return await new InExtensionMessageRequester().sendMessage(
+                        BACKGROUND_PORT,
+                        msg
+                      );
+                    } else {
+                      const msg = new SendTxAndRecordWithIBCSwapMsg(
+                        "amount-in",
+                        chainId,
+                        outChainId,
+                        tx,
+                        channels,
+                        {
+                          chainId: outChainId,
+                          denom: outCurrency.coinMinimalDenom,
+                        },
+                        swapChannelIndex,
+                        swapReceiver,
+                        mode,
+                        false,
+                        ibcSwapConfigs.senderConfig.sender,
+                        ibcSwapConfigs.amountConfig.amount.map((amount) => {
+                          return {
+                            amount: DecUtils.getTenExponentN(
+                              amount.currency.coinDecimals
+                            )
+                              .mul(amount.toDec())
+                              .toString(),
+                            denom: amount.currency.coinMinimalDenom,
+                          };
+                        }),
+                        ibcSwapConfigs.memoConfig.memo,
+                        {
+                          currencies:
+                            chainStore.getChain(outChainId).currencies,
+                        }
+                      );
 
-                    return await new InExtensionMessageRequester().sendMessage(
-                      BACKGROUND_PORT,
-                      msg
-                    );
-                  }
+                      return await new InExtensionMessageRequester().sendMessage(
+                        BACKGROUND_PORT,
+                        msg
+                      );
+                    }
+                  },
                 },
-              },
-              {
-                onBroadcasted: () => {
-                  if (
-                    !chainStore.isEnabledChain(
-                      ibcSwapConfigs.amountConfig.outChainId
-                    )
-                  ) {
-                    chainStore.enableChainInfoInUI(
-                      ibcSwapConfigs.amountConfig.outChainId
-                    );
-
-                    if (keyRingStore.selectedKeyInfo) {
-                      const outChainInfo = chainStore.getChain(
+                {
+                  onBroadcasted: () => {
+                    if (
+                      !chainStore.isEnabledChain(
+                        ibcSwapConfigs.amountConfig.outChainId
+                      )
+                    ) {
+                      chainStore.enableChainInfoInUI(
                         ibcSwapConfigs.amountConfig.outChainId
                       );
-                      if (
-                        keyRingStore.needKeyCoinTypeFinalize(
-                          keyRingStore.selectedKeyInfo.id,
-                          outChainInfo
-                        )
-                      ) {
-                        keyRingStore.finalizeKeyCoinType(
-                          keyRingStore.selectedKeyInfo.id,
-                          outChainInfo.chainId,
-                          outChainInfo.bip44.coinType
+
+                      if (keyRingStore.selectedKeyInfo) {
+                        const outChainInfo = chainStore.getChain(
+                          ibcSwapConfigs.amountConfig.outChainId
                         );
+                        if (
+                          keyRingStore.needKeyCoinTypeFinalize(
+                            keyRingStore.selectedKeyInfo.id,
+                            outChainInfo
+                          )
+                        ) {
+                          keyRingStore.finalizeKeyCoinType(
+                            keyRingStore.selectedKeyInfo.id,
+                            outChainInfo.chainId,
+                            outChainInfo.bip44.coinType
+                          );
+                        }
                       }
                     }
-                  }
 
-                  const params: Record<
-                    string,
-                    number | string | boolean | number[] | string[] | undefined
-                  > = {
-                    inChainId: inChainId,
-                    inChainIdentifier:
-                      ChainIdHelper.parse(inChainId).identifier,
-                    inCurrencyMinimalDenom: inCurrency.coinMinimalDenom,
-                    inCurrencyDenom: inCurrency.coinDenom,
-                    inCurrencyCommonMinimalDenom: inCurrency.coinMinimalDenom,
-                    inCurrencyCommonDenom: inCurrency.coinDenom,
-                    outChainId: outChainId,
-                    outChainIdentifier:
-                      ChainIdHelper.parse(outChainId).identifier,
-                    outCurrencyMinimalDenom: outCurrency.coinMinimalDenom,
-                    outCurrencyDenom: outCurrency.coinDenom,
-                    outCurrencyCommonMinimalDenom: outCurrency.coinMinimalDenom,
-                    outCurrencyCommonDenom: outCurrency.coinDenom,
-                    swapType: ibcSwapConfigs.amountConfig.type,
-                  };
-                  if (
-                    "originChainId" in inCurrency &&
-                    inCurrency.originChainId
-                  ) {
-                    const originChainId = inCurrency.originChainId;
-                    params["inOriginChainId"] = originChainId;
-                    params["inOriginChainIdentifier"] =
-                      ChainIdHelper.parse(originChainId).identifier;
+                    const params: Record<
+                      string,
+                      | number
+                      | string
+                      | boolean
+                      | number[]
+                      | string[]
+                      | undefined
+                    > = {
+                      inChainId: inChainId,
+                      inChainIdentifier:
+                        ChainIdHelper.parse(inChainId).identifier,
+                      inCurrencyMinimalDenom: inCurrency.coinMinimalDenom,
+                      inCurrencyDenom: inCurrency.coinDenom,
+                      inCurrencyCommonMinimalDenom: inCurrency.coinMinimalDenom,
+                      inCurrencyCommonDenom: inCurrency.coinDenom,
+                      outChainId: outChainId,
+                      outChainIdentifier:
+                        ChainIdHelper.parse(outChainId).identifier,
+                      outCurrencyMinimalDenom: outCurrency.coinMinimalDenom,
+                      outCurrencyDenom: outCurrency.coinDenom,
+                      outCurrencyCommonMinimalDenom:
+                        outCurrency.coinMinimalDenom,
+                      outCurrencyCommonDenom: outCurrency.coinDenom,
+                      swapType: ibcSwapConfigs.amountConfig.type,
+                    };
+                    if (
+                      "originChainId" in inCurrency &&
+                      inCurrency.originChainId
+                    ) {
+                      const originChainId = inCurrency.originChainId;
+                      params["inOriginChainId"] = originChainId;
+                      params["inOriginChainIdentifier"] =
+                        ChainIdHelper.parse(originChainId).identifier;
 
-                    params["inToDifferentChain"] = true;
-                  }
-                  if (
-                    "originCurrency" in inCurrency &&
-                    inCurrency.originCurrency
-                  ) {
-                    params["inCurrencyCommonMinimalDenom"] =
-                      inCurrency.originCurrency.coinMinimalDenom;
-                    params["inCurrencyCommonDenom"] =
-                      inCurrency.originCurrency.coinDenom;
-                  }
-                  if (
-                    "originChainId" in outCurrency &&
-                    outCurrency.originChainId
-                  ) {
-                    const originChainId = outCurrency.originChainId;
-                    params["outOriginChainId"] = originChainId;
-                    params["outOriginChainIdentifier"] =
-                      ChainIdHelper.parse(originChainId).identifier;
+                      params["inToDifferentChain"] = true;
+                    }
+                    if (
+                      "originCurrency" in inCurrency &&
+                      inCurrency.originCurrency
+                    ) {
+                      params["inCurrencyCommonMinimalDenom"] =
+                        inCurrency.originCurrency.coinMinimalDenom;
+                      params["inCurrencyCommonDenom"] =
+                        inCurrency.originCurrency.coinDenom;
+                    }
+                    if (
+                      "originChainId" in outCurrency &&
+                      outCurrency.originChainId
+                    ) {
+                      const originChainId = outCurrency.originChainId;
+                      params["outOriginChainId"] = originChainId;
+                      params["outOriginChainIdentifier"] =
+                        ChainIdHelper.parse(originChainId).identifier;
 
-                    params["outToDifferentChain"] = true;
-                  }
-                  if (
-                    "originCurrency" in outCurrency &&
-                    outCurrency.originCurrency
-                  ) {
-                    params["outCurrencyCommonMinimalDenom"] =
-                      outCurrency.originCurrency.coinMinimalDenom;
-                    params["outCurrencyCommonDenom"] =
-                      outCurrency.originCurrency.coinDenom;
-                  }
-                  params["inRange"] = amountToAmbiguousString(
-                    ibcSwapConfigs.amountConfig.amount[0]
-                  );
-                  params["outRange"] = amountToAmbiguousString(
-                    ibcSwapConfigs.amountConfig.outAmount
-                  );
+                      params["outToDifferentChain"] = true;
+                    }
+                    if (
+                      "originCurrency" in outCurrency &&
+                      outCurrency.originCurrency
+                    ) {
+                      params["outCurrencyCommonMinimalDenom"] =
+                        outCurrency.originCurrency.coinMinimalDenom;
+                      params["outCurrencyCommonDenom"] =
+                        outCurrency.originCurrency.coinDenom;
+                    }
+                    params["inRange"] = amountToAmbiguousString(
+                      ibcSwapConfigs.amountConfig.amount[0]
+                    );
+                    params["outRange"] = amountToAmbiguousString(
+                      ibcSwapConfigs.amountConfig.outAmount
+                    );
 
-                  // UI 상에서 in currency의 가격은 in input에서 표시되고
-                  // out currency의 가격은 swap fee에서 표시된다.
-                  // price store에서 usd는 무조건 쿼리하므로 in, out currency의 usd는 보장된다.
-                  const inCurrencyPrice = priceStore.calculatePrice(
-                    ibcSwapConfigs.amountConfig.amount[0],
-                    "usd"
-                  );
-                  if (inCurrencyPrice) {
-                    params["inFiatRange"] =
-                      amountToAmbiguousString(inCurrencyPrice);
-                    params["inFiatAvg"] =
-                      amountToAmbiguousAverage(inCurrencyPrice);
-                  }
-                  const outCurrencyPrice = priceStore.calculatePrice(
-                    ibcSwapConfigs.amountConfig.outAmount,
-                    "usd"
-                  );
-                  if (outCurrencyPrice) {
-                    params["outFiatRange"] =
-                      amountToAmbiguousString(outCurrencyPrice);
-                    params["outFiatAvg"] =
-                      amountToAmbiguousAverage(outCurrencyPrice);
-                  }
+                    // UI 상에서 in currency의 가격은 in input에서 표시되고
+                    // out currency의 가격은 swap fee에서 표시된다.
+                    // price store에서 usd는 무조건 쿼리하므로 in, out currency의 usd는 보장된다.
+                    const inCurrencyPrice = priceStore.calculatePrice(
+                      ibcSwapConfigs.amountConfig.amount[0],
+                      "usd"
+                    );
+                    if (inCurrencyPrice) {
+                      params["inFiatRange"] =
+                        amountToAmbiguousString(inCurrencyPrice);
+                      params["inFiatAvg"] =
+                        amountToAmbiguousAverage(inCurrencyPrice);
+                    }
+                    const outCurrencyPrice = priceStore.calculatePrice(
+                      ibcSwapConfigs.amountConfig.outAmount,
+                      "usd"
+                    );
+                    if (outCurrencyPrice) {
+                      params["outFiatRange"] =
+                        amountToAmbiguousString(outCurrencyPrice);
+                      params["outFiatAvg"] =
+                        amountToAmbiguousAverage(outCurrencyPrice);
+                    }
 
-                  new InExtensionMessageRequester().sendMessage(
-                    BACKGROUND_PORT,
-                    new LogAnalyticsEventMsg("ibc_swap", params)
-                  );
+                    new InExtensionMessageRequester().sendMessage(
+                      BACKGROUND_PORT,
+                      new LogAnalyticsEventMsg("ibc_swap", params)
+                    );
 
-                  analyticsStore.logEvent("swap_occurred", {
-                    in_chain_id: inChainId,
-                    in_chain_identifier:
-                      ChainIdHelper.parse(inChainId).identifier,
-                    in_currency_minimal_denom: inCurrency.coinMinimalDenom,
-                    in_currency_denom: inCurrency.coinDenom,
-                    out_chain_id: outChainId,
-                    out_chain_identifier:
-                      ChainIdHelper.parse(outChainId).identifier,
-                    out_currency_minimal_denom: outCurrency.coinMinimalDenom,
-                    out_currency_denom: outCurrency.coinDenom,
-                  });
-                },
-                onFulfill: (tx: any) => {
-                  if (tx.code != null && tx.code !== 0) {
-                    console.log(tx.log ?? tx.raw_log);
+                    analyticsStore.logEvent("swap_occurred", {
+                      in_chain_id: inChainId,
+                      in_chain_identifier:
+                        ChainIdHelper.parse(inChainId).identifier,
+                      in_currency_minimal_denom: inCurrency.coinMinimalDenom,
+                      in_currency_denom: inCurrency.coinDenom,
+                      out_chain_id: outChainId,
+                      out_chain_identifier:
+                        ChainIdHelper.parse(outChainId).identifier,
+                      out_currency_minimal_denom: outCurrency.coinMinimalDenom,
+                      out_currency_denom: outCurrency.coinDenom,
+                    });
+                  },
+                  onFulfill: (tx: any) => {
+                    if (tx.code != null && tx.code !== 0) {
+                      console.log(tx.log ?? tx.raw_log);
+                      notification.show(
+                        "failed",
+                        intl.formatMessage({ id: "error.transaction-failed" }),
+                        ""
+                      );
+                      return;
+                    }
                     notification.show(
-                      "failed",
-                      intl.formatMessage({ id: "error.transaction-failed" }),
+                      "success",
+                      intl.formatMessage({
+                        id: "notification.transaction-success",
+                      }),
                       ""
                     );
-                    return;
-                  }
-                  notification.show(
-                    "success",
-                    intl.formatMessage({
-                      id: "notification.transaction-success",
-                    }),
-                    ""
-                  );
+                  },
+                }
+              );
+            } else {
+              const { maxFeePerGas, maxPriorityFeePerGas } =
+                ibcSwapConfigs.feeConfig.getEIP1559TxFees(
+                  ibcSwapConfigs.feeConfig.type
+                );
+
+              await ethereumAccountStore.getAccount(inChainId).sendEthereumTx(
+                account.ethereumHexAddress,
+                {
+                  ...tx,
+                  gasLimit: ibcSwapConfigs.gasConfig.gas,
+                  maxFeePerGas: maxFeePerGas.truncate().toString(),
+                  maxPriorityFeePerGas: maxPriorityFeePerGas
+                    .truncate()
+                    .toString(),
                 },
-              }
-            );
+                {
+                  onBroadcasted: () => {
+                    if (
+                      !chainStore.isEnabledChain(
+                        ibcSwapConfigs.amountConfig.outChainId
+                      )
+                    ) {
+                      chainStore.enableChainInfoInUI(
+                        ibcSwapConfigs.amountConfig.outChainId
+                      );
+
+                      if (keyRingStore.selectedKeyInfo) {
+                        const outChainInfo = chainStore.getChain(
+                          ibcSwapConfigs.amountConfig.outChainId
+                        );
+                        if (
+                          keyRingStore.needKeyCoinTypeFinalize(
+                            keyRingStore.selectedKeyInfo.id,
+                            outChainInfo
+                          )
+                        ) {
+                          keyRingStore.finalizeKeyCoinType(
+                            keyRingStore.selectedKeyInfo.id,
+                            outChainInfo.chainId,
+                            outChainInfo.bip44.coinType
+                          );
+                        }
+                      }
+                    }
+
+                    const params: Record<
+                      string,
+                      | number
+                      | string
+                      | boolean
+                      | number[]
+                      | string[]
+                      | undefined
+                    > = {
+                      inChainId: inChainId,
+                      inChainIdentifier:
+                        ChainIdHelper.parse(inChainId).identifier,
+                      inCurrencyMinimalDenom: inCurrency.coinMinimalDenom,
+                      inCurrencyDenom: inCurrency.coinDenom,
+                      inCurrencyCommonMinimalDenom: inCurrency.coinMinimalDenom,
+                      inCurrencyCommonDenom: inCurrency.coinDenom,
+                      outChainId: outChainId,
+                      outChainIdentifier:
+                        ChainIdHelper.parse(outChainId).identifier,
+                      outCurrencyMinimalDenom: outCurrency.coinMinimalDenom,
+                      outCurrencyDenom: outCurrency.coinDenom,
+                      outCurrencyCommonMinimalDenom:
+                        outCurrency.coinMinimalDenom,
+                      outCurrencyCommonDenom: outCurrency.coinDenom,
+                      swapType: ibcSwapConfigs.amountConfig.type,
+                    };
+                    if (
+                      "originChainId" in inCurrency &&
+                      inCurrency.originChainId
+                    ) {
+                      const originChainId = inCurrency.originChainId;
+                      params["inOriginChainId"] = originChainId;
+                      params["inOriginChainIdentifier"] =
+                        ChainIdHelper.parse(originChainId).identifier;
+
+                      params["inToDifferentChain"] = true;
+                    }
+                    if (
+                      "originCurrency" in inCurrency &&
+                      inCurrency.originCurrency
+                    ) {
+                      params["inCurrencyCommonMinimalDenom"] =
+                        inCurrency.originCurrency.coinMinimalDenom;
+                      params["inCurrencyCommonDenom"] =
+                        inCurrency.originCurrency.coinDenom;
+                    }
+                    if (
+                      "originChainId" in outCurrency &&
+                      outCurrency.originChainId
+                    ) {
+                      const originChainId = outCurrency.originChainId;
+                      params["outOriginChainId"] = originChainId;
+                      params["outOriginChainIdentifier"] =
+                        ChainIdHelper.parse(originChainId).identifier;
+
+                      params["outToDifferentChain"] = true;
+                    }
+                    if (
+                      "originCurrency" in outCurrency &&
+                      outCurrency.originCurrency
+                    ) {
+                      params["outCurrencyCommonMinimalDenom"] =
+                        outCurrency.originCurrency.coinMinimalDenom;
+                      params["outCurrencyCommonDenom"] =
+                        outCurrency.originCurrency.coinDenom;
+                    }
+                    params["inRange"] = amountToAmbiguousString(
+                      ibcSwapConfigs.amountConfig.amount[0]
+                    );
+                    params["outRange"] = amountToAmbiguousString(
+                      ibcSwapConfigs.amountConfig.outAmount
+                    );
+
+                    // UI 상에서 in currency의 가격은 in input에서 표시되고
+                    // out currency의 가격은 swap fee에서 표시된다.
+                    // price store에서 usd는 무조건 쿼리하므로 in, out currency의 usd는 보장된다.
+                    const inCurrencyPrice = priceStore.calculatePrice(
+                      ibcSwapConfigs.amountConfig.amount[0],
+                      "usd"
+                    );
+                    if (inCurrencyPrice) {
+                      params["inFiatRange"] =
+                        amountToAmbiguousString(inCurrencyPrice);
+                      params["inFiatAvg"] =
+                        amountToAmbiguousAverage(inCurrencyPrice);
+                    }
+                    const outCurrencyPrice = priceStore.calculatePrice(
+                      ibcSwapConfigs.amountConfig.outAmount,
+                      "usd"
+                    );
+                    if (outCurrencyPrice) {
+                      params["outFiatRange"] =
+                        amountToAmbiguousString(outCurrencyPrice);
+                      params["outFiatAvg"] =
+                        amountToAmbiguousAverage(outCurrencyPrice);
+                    }
+
+                    new InExtensionMessageRequester().sendMessage(
+                      BACKGROUND_PORT,
+                      new LogAnalyticsEventMsg("ibc_swap", params)
+                    );
+
+                    analyticsStore.logEvent("swap_occurred", {
+                      in_chain_id: inChainId,
+                      in_chain_identifier:
+                        ChainIdHelper.parse(inChainId).identifier,
+                      in_currency_minimal_denom: inCurrency.coinMinimalDenom,
+                      in_currency_denom: inCurrency.coinDenom,
+                      out_chain_id: outChainId,
+                      out_chain_identifier:
+                        ChainIdHelper.parse(outChainId).identifier,
+                      out_currency_minimal_denom: outCurrency.coinMinimalDenom,
+                      out_currency_denom: outCurrency.coinDenom,
+                    });
+                  },
+                  onFulfill: (txReceipt) => {
+                    if (txReceipt.status === EthTxStatus.Success) {
+                      notification.show(
+                        "success",
+                        intl.formatMessage({
+                          id: "notification.transaction-success",
+                        }),
+                        ""
+                      );
+                    } else {
+                      notification.show(
+                        "failed",
+                        intl.formatMessage({ id: "error.transaction-failed" }),
+                        ""
+                      );
+                    }
+                  },
+                }
+              );
+            }
 
             navigate("/", {
               replace: true,

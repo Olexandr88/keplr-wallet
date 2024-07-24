@@ -83,9 +83,17 @@ export const SwapAssetInfo: FunctionComponent<{
   ) => void;
 }> = observer(
   ({ type, senderConfig, amountConfig, onDestinationChainSelect }) => {
-    const { chainStore, queriesStore, priceStore, uiConfigStore } = useStore();
+    const {
+      chainStore,
+      accountStore,
+      queriesStore,
+      priceStore,
+      uiConfigStore,
+    } = useStore();
 
     const theme = useTheme();
+
+    const account = accountStore.getAccount(senderConfig.chainId);
 
     const navigate = useNavigate();
     const [searchParams] = useSearchParams();
@@ -216,12 +224,22 @@ export const SwapAssetInfo: FunctionComponent<{
                   },
                   {
                     asset: (() => {
-                      const bal = queriesStore
-                        .get(senderConfig.chainId)
-                        .queryBalances.getQueryBech32Address(
-                          senderConfig.sender
-                        )
-                        .getBalance(amountConfig.currency);
+                      const isEVMOnlyChain = chainStore.isEvmOnlyChain(
+                        senderConfig.chainId
+                      );
+                      const queryBalances = queriesStore.get(
+                        senderConfig.chainId
+                      ).queryBalances;
+
+                      const bal = isEVMOnlyChain
+                        ? queryBalances
+                            .getQueryEthereumHexAddress(
+                              account.ethereumHexAddress
+                            )
+                            .getBalance(amountConfig.currency)
+                        : queryBalances
+                            .getQueryBech32Address(account.bech32Address)
+                            .getBalance(amountConfig.currency);
 
                       if (!bal) {
                         return `0 ${amountConfig.currency.coinDenom}`;

@@ -9,6 +9,7 @@ import { simpleFetch } from "@keplr-wallet/simple-fetch";
 import { computed, makeObservable } from "mobx";
 import { CoinPretty, Dec, RatePretty } from "@keplr-wallet/unit";
 import Joi from "joi";
+import { DenomHelper } from "@keplr-wallet/common";
 
 const Schema = Joi.object<RouteResponse>({
   source_asset_denom: Joi.string().required(),
@@ -56,6 +57,49 @@ const Schema = Joi.object<RouteResponse>({
         })
           .required()
           .unknown(true),
+      }).unknown(true),
+      Joi.object({
+        axelar_transfer: Joi.object({
+          asset: Joi.string(),
+          bridge_id: Joi.string(),
+          denom_in: Joi.string(),
+          denom_out: Joi.string(),
+          from_chain: Joi.string(),
+          from_chain_id: Joi.string(),
+          to_chain: Joi.string(),
+          to_chain_id: Joi.string(),
+          fee_amount: Joi.string(),
+          fee_asset: Joi.object({
+            chain_id: Joi.string(),
+            denom: Joi.string(),
+            decimals: Joi.number(),
+            symbol: Joi.string(),
+          }).unknown(true),
+        })
+          .required()
+          .unknown(true),
+      }).unknown(true),
+      Joi.object({
+        evm_swap: Joi.object({
+          amount_in: Joi.string(),
+          amount_out: Joi.string(),
+          denom_in: Joi.string(),
+          denom_out: Joi.string(),
+          from_chain_id: Joi.string(),
+        })
+          .required()
+          .unknown(true),
+      }).unknown(true),
+      Joi.object({
+        cctp_transfer: Joi.object({
+          bridge_id: Joi.string().required(),
+          denom_in: Joi.string().required(),
+          denom_out: Joi.string().required(),
+          from_chain_id: Joi.string().required(),
+          to_chain_id: Joi.string().required(),
+        })
+          .required()
+          .unknown(true),
       }).unknown(true)
     )
     .required(),
@@ -86,7 +130,7 @@ export class ObservableQueryRouteInner extends ObservableQuery<RouteResponse> {
       readonly chainId: string;
     }
   ) {
-    super(sharedContext, skipURL, "/v1/fungible/route");
+    super(sharedContext, skipURL, "/v2/fungible/route");
 
     makeObservable(this);
   }
@@ -177,6 +221,15 @@ export class ObservableQueryRouteInner extends ObservableQuery<RouteResponse> {
   protected override async fetchResponse(
     abortController: AbortController
   ): Promise<{ headers: any; data: RouteResponse }> {
+    const sourceChainInfo = this.chainGetter.getChain(this.sourceChainId);
+    const isSourceChainEvmOnly =
+      this.sourceChainId.startsWith("eip155:") && sourceChainInfo.evm != null;
+    const sourceDenomHelper = new DenomHelper(this.sourceDenom);
+    const destChainInfo = this.chainGetter.getChain(this.destChainId);
+    const isDestChainEvmOnly =
+      this.destChainId.startsWith("eip155:") && destChainInfo.evm != null;
+    const destDenomHelper = new DenomHelper(this.destDenom);
+
     const result = await simpleFetch<RouteResponse>(this.baseURL, this.url, {
       method: "POST",
       headers: {
@@ -184,25 +237,45 @@ export class ObservableQueryRouteInner extends ObservableQuery<RouteResponse> {
       },
       body: JSON.stringify({
         amount_in: this.sourceAmount,
-        source_asset_denom: this.sourceDenom,
-        source_asset_chain_id: this.sourceChainId,
-        dest_asset_denom: this.destDenom,
-        dest_asset_chain_id: this.destChainId,
+        source_asset_denom:
+          sourceDenomHelper.type === "erc20"
+            ? sourceDenomHelper.contractAddress
+            : this.sourceDenom,
+        source_asset_chain_id: isSourceChainEvmOnly
+          ? this.sourceChainId.replace("eip155:", "")
+          : this.sourceChainId,
+        dest_asset_denom:
+          destDenomHelper.type === "erc20"
+            ? destDenomHelper.contractAddress
+            : this.destDenom,
+        dest_asset_chain_id: isDestChainEvmOnly
+          ? this.destChainId.replace("eip155:", "")
+          : this.destChainId,
         cumulative_affiliate_fee_bps: this.affiliateFeeBps.toString(),
-        swap_venue: {
-          name: this.swapVenue.name,
-          chain_id: this.swapVenue.chainId,
-        },
+        ...((isSourceChainEvmOnly || isDestChainEvmOnly) && {
+          allow_unsafe: true,
+          allow_multi_tx: true,
+          experimental_features: ["hyperlane"],
+          smart_relay: true,
+          smart_swap_options: {
+            split_routes: true,
+            evm_swaps: true,
+          },
+        }),
+        ...(!isSourceChainEvmOnly &&
+          !isDestChainEvmOnly && {
+            swap_venue: {
+              name: this.swapVenue.name,
+              chain_id: this.swapVenue.chainId,
+            },
+          }),
       }),
       signal: abortController.signal,
     });
 
     const validated = Schema.validate(result.data);
     if (validated.error) {
-      console.log(
-        "Failed to validate assets from source response",
-        validated.error
-      );
+      console.log("Failed to validate route response", validated.error);
       throw validated.error;
     }
 

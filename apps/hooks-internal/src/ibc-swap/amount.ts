@@ -18,6 +18,7 @@ import {
   SkipQueries,
   ObservableQueryIBCSwapInner,
 } from "@keplr-wallet/stores-internal";
+import { EthereumAccountStore } from "@keplr-wallet/stores-eth";
 
 export class IBCSwapAmountConfig extends AmountConfig {
   @observable
@@ -33,6 +34,7 @@ export class IBCSwapAmountConfig extends AmountConfig {
     protected readonly accountStore: IAccountStoreWithInjects<
       [CosmosAccount, CosmwasmAccount]
     >,
+    protected readonly ethereumAccountStore: EthereumAccountStore,
     protected readonly skipQueries: SkipQueries,
     initialChainId: string,
     senderConfig: ISenderConfig,
@@ -138,7 +140,16 @@ export class IBCSwapAmountConfig extends AmountConfig {
     slippageTolerancePercent: number,
     affiliateFeeReceiver: string,
     priorOutAmount?: Int
-  ): Promise<MakeTxResponse> {
+  ): Promise<
+    | MakeTxResponse
+    | {
+        chainId: number;
+        to: string;
+        value: string;
+        data: string;
+        simulate: () => Promise<{ gasUsed: number }>;
+      }
+  > {
     const queryIBCSwap = this.getQueryIBCSwap();
     if (!queryIBCSwap) {
       throw new Error("Query IBC Swap is not initialized");
@@ -184,14 +195,28 @@ export class IBCSwapAmountConfig extends AmountConfig {
       }
     }
 
-    chainIdsToAddresses[this.chainId] = sourceAccount.bech32Address;
-    chainIdsToAddresses[queryIBCSwap.swapVenue.chainId] =
-      swapAccount.bech32Address;
+    const isSourceChainEVMOnly =
+      this.chainId.startsWith("eip155:") && this.chainInfo.evm != null;
+    chainIdsToAddresses[
+      isSourceChainEVMOnly ? this.chainId.replace("eip155:", "") : this.chainId
+    ] = isSourceChainEVMOnly
+      ? sourceAccount.ethereumHexAddress
+      : sourceAccount.bech32Address;
+
+    const isSwapChainEVMOnly = !isNaN(
+      parseInt(queryIBCSwap.swapVenue.chainId, 10)
+    );
+    chainIdsToAddresses[queryIBCSwap.swapVenue.chainId] = isSwapChainEVMOnly
+      ? swapAccount.ethereumHexAddress
+      : swapAccount.bech32Address;
+
     for (const destinationChainId of destinationChainIds) {
       const destinationAccount =
         this.accountStore.getAccount(destinationChainId);
-      chainIdsToAddresses[destinationChainId] =
-        destinationAccount.bech32Address;
+      const isDestChainEvmOnly = !isNaN(parseInt(destinationChainId, 10));
+      chainIdsToAddresses[destinationChainId] = isDestChainEvmOnly
+        ? destinationAccount.ethereumHexAddress
+        : destinationAccount.bech32Address;
     }
 
     const queryMsgsDirect = queryIBCSwap.getQueryMsgsDirect(
@@ -248,7 +273,16 @@ export class IBCSwapAmountConfig extends AmountConfig {
   getTxIfReady(
     slippageTolerancePercent: number,
     affiliateFeeReceiver: string
-  ): MakeTxResponse | undefined {
+  ):
+    | MakeTxResponse
+    | {
+        chainId: number;
+        to: string;
+        value: string;
+        data: string;
+        simulate: () => Promise<{ gasUsed: number }>;
+      }
+    | undefined {
     if (!this.currency) {
       return;
     }
@@ -306,14 +340,28 @@ export class IBCSwapAmountConfig extends AmountConfig {
       }
     }
 
-    chainIdsToAddresses[this.chainId] = sourceAccount.bech32Address;
-    chainIdsToAddresses[queryIBCSwap.swapVenue.chainId] =
-      swapAccount.bech32Address;
+    const isSourceChainEVMOnly =
+      this.chainId.startsWith("eip155:") && this.chainInfo.evm != null;
+    chainIdsToAddresses[
+      isSourceChainEVMOnly ? this.chainId.replace("eip155:", "") : this.chainId
+    ] = isSourceChainEVMOnly
+      ? sourceAccount.ethereumHexAddress
+      : sourceAccount.bech32Address;
+
+    const isSwapChainEVMOnly = !isNaN(
+      parseInt(queryIBCSwap.swapVenue.chainId, 10)
+    );
+    chainIdsToAddresses[queryIBCSwap.swapVenue.chainId] = isSwapChainEVMOnly
+      ? swapAccount.ethereumHexAddress
+      : swapAccount.bech32Address;
+
     for (const destinationChainId of destinationChainIds) {
       const destinationAccount =
         this.accountStore.getAccount(destinationChainId);
-      chainIdsToAddresses[destinationChainId] =
-        destinationAccount.bech32Address;
+      const isDestChainEvmOnly = !isNaN(parseInt(destinationChainId, 10));
+      chainIdsToAddresses[destinationChainId] = isDestChainEvmOnly
+        ? destinationAccount.ethereumHexAddress
+        : destinationAccount.bech32Address;
     }
 
     const queryMsgsDirect = queryIBCSwap.getQueryMsgsDirect(
@@ -349,6 +397,21 @@ export class IBCSwapAmountConfig extends AmountConfig {
       );
       tx.ui.overrideType("ibc-swap");
       return tx;
+    } else if (msg.type === "EvmTx") {
+      const evmTx = {
+        chainId: parseInt(msg.evmChainId, 10),
+        to: msg.to,
+        value: `0x${BigInt(msg.value).toString(16)}`,
+        data: `0x${msg.data}`,
+      };
+
+      return {
+        ...evmTx,
+        simulate: () =>
+          this.ethereumAccountStore
+            .getAccount(this.chainId)
+            .simulateGas(sourceAccount.ethereumHexAddress, evmTx),
+      };
     }
   }
 
@@ -374,64 +437,68 @@ export class IBCSwapAmountConfig extends AmountConfig {
     let key = "";
 
     for (const msg of response.msgs) {
-      if (msg.msg_type_url === "/ibc.applications.transfer.v1.MsgTransfer") {
-        const memo = JSON.parse(msg.msg).memo;
-        if (memo) {
-          const obj = JSON.parse(memo);
-          const wasms: any = [];
+      if ("evm_tx" in msg) {
+        // TODO
+      } else {
+        if (msg.msg_type_url === "/ibc.applications.transfer.v1.MsgTransfer") {
+          const memo = JSON.parse(msg.msg).memo;
+          if (memo) {
+            const obj = JSON.parse(memo);
+            const wasms: any = [];
 
-          if (obj.wasm) {
-            wasms.push(obj.wasm);
-          }
+            if (obj.wasm) {
+              wasms.push(obj.wasm);
+            }
 
-          let forward = obj.forward;
-          if (forward) {
-            while (true) {
-              if (forward) {
-                if (forward.memo) {
-                  const obj = JSON.parse(forward.memo);
-                  if (obj.wasm) {
-                    wasms.push(obj.wasm);
+            let forward = obj.forward;
+            if (forward) {
+              while (true) {
+                if (forward) {
+                  if (forward.memo) {
+                    const obj = JSON.parse(forward.memo);
+                    if (obj.wasm) {
+                      wasms.push(obj.wasm);
+                    }
                   }
-                }
 
-                if (forward.wasm) {
-                  wasms.push(forward.wasm);
-                }
+                  if (forward.wasm) {
+                    wasms.push(forward.wasm);
+                  }
 
-                if (forward.next) {
-                  const obj =
-                    typeof forward.next === "string"
-                      ? JSON.parse(forward.next)
-                      : forward.next;
+                  if (forward.next) {
+                    const obj =
+                      typeof forward.next === "string"
+                        ? JSON.parse(forward.next)
+                        : forward.next;
 
-                  if (obj.forward) {
-                    forward = obj.forward;
+                    if (obj.forward) {
+                      forward = obj.forward;
+                    } else {
+                      forward = obj;
+                    }
                   } else {
-                    forward = obj;
+                    break;
                   }
                 } else {
                   break;
                 }
-              } else {
-                break;
+              }
+            }
+
+            for (const wasm of wasms) {
+              for (const operation of wasm.msg.swap_and_action.user_swap
+                .swap_exact_asset_in.operations) {
+                key += `/${operation.pool}/${operation.denom_in}/${operation.denom_out}`;
               }
             }
           }
-
-          for (const wasm of wasms) {
-            for (const operation of wasm.msg.swap_and_action.user_swap
-              .swap_exact_asset_in.operations) {
-              key += `/${operation.pool}/${operation.denom_in}/${operation.denom_out}`;
-            }
-          }
         }
-      }
-      if (msg.msg_type_url === "/cosmwasm.wasm.v1.MsgExecuteContract") {
-        const obj = JSON.parse(msg.msg);
-        for (const operation of obj.msg.swap_and_action.user_swap
-          .swap_exact_asset_in.operations) {
-          key += `/${operation.pool}/${operation.denom_in}/${operation.denom_out}`;
+        if (msg.msg_type_url === "/cosmwasm.wasm.v1.MsgExecuteContract") {
+          const obj = JSON.parse(msg.msg);
+          for (const operation of obj.msg.swap_and_action.user_swap
+            .swap_exact_asset_in.operations) {
+            key += `/${operation.pool}/${operation.denom_in}/${operation.denom_out}`;
+          }
         }
       }
     }
@@ -543,6 +610,7 @@ export const useIBCSwapAmountConfig = (
   chainGetter: ChainGetter,
   queriesStore: IQueriesStore,
   accountStore: IAccountStoreWithInjects<[CosmosAccount, CosmwasmAccount]>,
+  ethereumAccountStore: EthereumAccountStore,
   skipQueries: SkipQueries,
   chainId: string,
   senderConfig: ISenderConfig,
@@ -556,6 +624,7 @@ export const useIBCSwapAmountConfig = (
         chainGetter,
         queriesStore,
         accountStore,
+        ethereumAccountStore,
         skipQueries,
         chainId,
         senderConfig,

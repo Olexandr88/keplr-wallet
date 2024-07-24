@@ -1023,13 +1023,16 @@ export class FeeConfig extends TxChainSetter implements IFeeConfig {
         continue;
       }
 
-      const bal = this.queriesStore
-        .get(this.chainId)
-        .queryBalances.getQueryBech32Address(this.senderConfig.value)
-        .balances.find(
-          (bal) =>
-            bal.currency.coinMinimalDenom === need.currency.coinMinimalDenom
-        );
+      const isEthereumHexAddress = this.senderConfig.value.startsWith("0x");
+      const queryBalances = this.queriesStore.get(this.chainId).queryBalances;
+
+      const bal = isEthereumHexAddress
+        ? queryBalances
+            .getQueryEthereumHexAddress(this.senderConfig.value)
+            .getBalance(need.currency)
+        : queryBalances
+            .getQueryBech32Address(this.senderConfig.value)
+            .getBalance(need.currency);
 
       if (!bal) {
         return {

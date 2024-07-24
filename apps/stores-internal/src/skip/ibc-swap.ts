@@ -346,8 +346,13 @@ export class ObservableQueryIbcSwap extends HasMapStore<ObservableQueryIBCSwapIn
         }
       }
     } else {
-      // 현재 CW20같은 얘들은 처리할 수 없다.
       if (!("type" in currency)) {
+        const isEVMOnlyChain = chainId.startsWith("eip155:");
+        if (isEVMOnlyChain) {
+          return true;
+        }
+
+        // 현재 CW20같은 얘들은 처리할 수 없다.
         return this.queryChains.isSupportsMemo(chainId);
       }
     }
@@ -363,10 +368,12 @@ export class ObservableQueryIbcSwap extends HasMapStore<ObservableQueryIBCSwapIn
       currencies: Currency[];
     }
   > {
-    const swapChainInfo = this.chainStore.getChain(this.swapVenue.chainId);
+    const swapVenueChainInfo = this.chainStore.getChain(this.swapVenue.chainId);
+    const evmChainInfos = this.chainStore.chainInfos.filter((chainInfo) =>
+      chainInfo.chainId.startsWith("eip155:")
+    );
 
-    const queryAssets = this.queryAssets.getAssets(swapChainInfo.chainId);
-    const assets = queryAssets.assetsOnlySwapUsages;
+    const swapChainInfos = [swapVenueChainInfo, ...evmChainInfos];
 
     // Key is chain identifier
     const res = new Map<
@@ -377,65 +384,79 @@ export class ObservableQueryIbcSwap extends HasMapStore<ObservableQueryIBCSwapIn
       }
     >();
 
-    const getMap = (chainId: string) => {
-      const chainIdentifier = this.chainStore.getChain(chainId).chainIdentifier;
-      let inner = res.get(chainIdentifier);
-      if (!inner) {
-        inner = {
-          chainInfo: this.chainStore.getChain(chainId),
-          currencies: [],
-        };
-        res.set(chainIdentifier, inner);
-      }
+    swapChainInfos.forEach((swapChainInfo) => {
+      const queryAssets = this.queryAssets.getAssets(swapChainInfo.chainId);
+      const assets = queryAssets.assetsOnlySwapUsages;
 
-      return inner;
-    };
+      const getMap = (chainId: string) => {
+        const chainIdentifier =
+          this.chainStore.getChain(chainId).chainIdentifier;
+        let inner = res.get(chainIdentifier);
+        if (!inner) {
+          inner = {
+            chainInfo: this.chainStore.getChain(chainId),
+            currencies: [],
+          };
+          res.set(chainIdentifier, inner);
+        }
 
-    for (const asset of assets) {
-      const chainId = asset.chainId;
+        return inner;
+      };
 
-      const currency = this.chainStore
-        .getChain(chainId)
-        .findCurrencyWithoutReaction(asset.denom);
+      for (const asset of assets) {
+        const chainId = asset.chainId;
 
-      if (currency) {
-        // If ibc currency is well known.
-        if (
-          "originCurrency" in currency &&
-          currency.originCurrency &&
-          "originChainId" in currency &&
-          currency.originChainId &&
-          // XXX: multi-hop ibc currency는 getSwapDestinationCurrencyAlternativeChains에서 처리한다.
-          currency.paths.length === 1
-        ) {
+        const currency = this.chainStore
+          .getChain(chainId)
+          .findCurrencyWithoutReaction(asset.denom);
+
+        if (currency) {
+          // If ibc currency is well known.
           if (
-            currency.originChainId.startsWith("gravity-bridge-") &&
-            currency.originCurrency.coinMinimalDenom !== "ugraviton"
+            "originCurrency" in currency &&
+            currency.originCurrency &&
+            "originChainId" in currency &&
+            currency.originChainId &&
+            // XXX: multi-hop ibc currency는 getSwapDestinationCurrencyAlternativeChains에서 처리한다.
+            currency.paths.length === 1
           ) {
-            continue;
-          }
-          if (!this.chainStore.isInChainInfosInListUI(currency.originChainId)) {
-            continue;
-          }
+            if (
+              currency.originChainId.startsWith("gravity-bridge-") &&
+              currency.originCurrency.coinMinimalDenom !== "ugraviton"
+            ) {
+              continue;
+            }
+            if (
+              !this.chainStore.isInChainInfosInListUI(currency.originChainId)
+            ) {
+              continue;
+            }
 
-          // 현재 CW20같은 얘들은 처리할 수 없다.
-          if (!("type" in currency.originCurrency)) {
-            // 일단 현재는 복잡한 케이스는 생각하지 않는다.
-            // 오스모시스를 거쳐서 오기 때문에 ibc 모듈만 있다면 자산을 받을 수 있다.
-            const originCurrency = currency.originCurrency;
-            const inner = getMap(currency.originChainId);
-            inner.currencies.push(originCurrency);
-          }
-        } else if (!("paths" in currency)) {
-          // 현재 CW20같은 얘들은 처리할 수 없다.
-          if (!("type" in currency)) {
-            // if currency is not ibc currency
-            const inner = getMap(chainId);
-            inner.currencies.push(currency);
+            // 현재 CW20같은 얘들은 처리할 수 없다.
+            if (!("type" in currency.originCurrency)) {
+              // 일단 현재는 복잡한 케이스는 생각하지 않는다.
+              // 오스모시스를 거쳐서 오기 때문에 ibc 모듈만 있다면 자산을 받을 수 있다.
+              const originCurrency = currency.originCurrency;
+              const inner = getMap(currency.originChainId);
+              inner.currencies.push(originCurrency);
+            }
+          } else if (!("paths" in currency)) {
+            // 현재 CW20같은 얘들은 처리할 수 없다.
+            if (!("type" in currency)) {
+              const isEVMOnlyChain = chainId.startsWith("eip155:");
+              if (isEVMOnlyChain) {
+                const inner = getMap(chainId);
+                inner.currencies.push(currency);
+              }
+
+              // if currency is not ibc currency
+              const inner = getMap(chainId);
+              inner.currencies.push(currency);
+            }
           }
         }
       }
-    }
+    });
 
     return res;
   }

@@ -19,6 +19,8 @@ const Schema = Joi.object<AssetsResponse>({
           chain_id: Joi.string().required(),
           origin_denom: Joi.string().required(),
           origin_chain_id: Joi.string().required(),
+          is_evm: Joi.boolean().required(),
+          token_contract: Joi.string().optional(),
         }).unknown(true)
       ),
     }).unknown(true)
@@ -36,7 +38,10 @@ export class ObservableQueryAssetsInner extends ObservableQuery<AssetsResponse> 
     super(
       sharedContext,
       skipURL,
-      `/v1/fungible/assets?chain_id=${chainId}&native_only=false`
+      `/v2/fungible/assets?chain_id=${chainId.replace(
+        "eip155:",
+        ""
+      )}&native_only=false&include_evm_assets=true`
     );
 
     makeObservable(this);
@@ -67,7 +72,9 @@ export class ObservableQueryAssetsInner extends ObservableQuery<AssetsResponse> 
     }
 
     const assetsInResponse =
-      this.response.data.chain_to_assets_map[chainInfo.chainId];
+      this.response.data.chain_to_assets_map[
+        chainInfo.chainId.replace("eip155:", "")
+      ];
     if (assetsInResponse) {
       const res: {
         denom: string;
@@ -90,7 +97,13 @@ export class ObservableQueryAssetsInner extends ObservableQuery<AssetsResponse> 
               originChainId: asset.origin_chain_id,
             });
             // IBC asset이 아니라면 알고있는 currency만 넣는다.
-          } else if (chainInfo.findCurrencyWithoutReaction(asset.denom)) {
+          } else if (
+            chainInfo.findCurrencyWithoutReaction(
+              asset.is_evm && !!asset.token_contract
+                ? `erc20:${asset.token_contract}`
+                : asset.denom
+            )
+          ) {
             res.push({
               denom: asset.denom,
               chainId: asset.chain_id,
@@ -132,7 +145,9 @@ export class ObservableQueryAssetsInner extends ObservableQuery<AssetsResponse> 
     }
 
     const assetsInResponse =
-      this.response.data.chain_to_assets_map[chainInfo.chainId];
+      this.response.data.chain_to_assets_map[
+        chainInfo.chainId.replace("eip155:", "")
+      ];
     if (assetsInResponse) {
       const res: {
         denom: string;
@@ -147,6 +162,7 @@ export class ObservableQueryAssetsInner extends ObservableQuery<AssetsResponse> 
           this.chainStore.hasChain(asset.origin_chain_id)
         ) {
           if (
+            !this.chainId.startsWith("eip155:") &&
             !this.swapUsageQueries.querySwapUsage
               .getSwapUsage(this.chainId)
               .isSwappable(asset.denom)
@@ -163,9 +179,18 @@ export class ObservableQueryAssetsInner extends ObservableQuery<AssetsResponse> 
               originChainId: asset.origin_chain_id,
             });
             // IBC asset이 아니라면 알고있는 currency만 넣는다.
-          } else if (chainInfo.findCurrencyWithoutReaction(asset.denom)) {
+          } else if (
+            chainInfo.findCurrencyWithoutReaction(
+              asset.is_evm && !!asset.token_contract
+                ? `erc20:${asset.token_contract}`
+                : asset.denom
+            )
+          ) {
             res.push({
-              denom: asset.denom,
+              denom:
+                asset.is_evm && !!asset.token_contract
+                  ? `erc20:${asset.token_contract}`
+                  : asset.denom,
               chainId: asset.chain_id,
               originDenom: asset.origin_denom,
               originChainId: asset.origin_chain_id,
@@ -187,10 +212,7 @@ export class ObservableQueryAssetsInner extends ObservableQuery<AssetsResponse> 
 
     const validated = Schema.validate(result.data);
     if (validated.error) {
-      console.log(
-        "Failed to validate assets from source response",
-        validated.error
-      );
+      console.log("Failed to validate assets response", validated.error);
       throw validated.error;
     }
 

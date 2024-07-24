@@ -26,7 +26,7 @@ export class ObservableQueryChains extends ObservableQuery<ChainsResponse> {
     protected readonly chainStore: InternalChainStore,
     protected readonly skipURL: string
   ) {
-    super(sharedContext, skipURL, "/v1/info/chains");
+    super(sharedContext, skipURL, "/v1/info/chains?include_evm=true");
 
     makeObservable(this);
   }
@@ -44,7 +44,16 @@ export class ObservableQueryChains extends ObservableQuery<ChainsResponse> {
 
     return {
       headers: res.headers,
-      data: validated.value,
+      data: {
+        chains: validated.value.chains.map((chain) => {
+          const isEvmChain = !isNaN(parseInt(chain.chain_id));
+
+          return {
+            ...chain,
+            chain_id: isEvmChain ? `eip155:${chain.chain_id}` : chain.chain_id,
+          };
+        }),
+      },
     };
   }
 

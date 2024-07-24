@@ -549,7 +549,10 @@ export class ChainStore<C extends ChainInfo = ChainInfo>
   }
 
   hasChain(chainId: string): boolean {
-    const chainIdentifier = ChainIdHelper.parse(chainId);
+    const isEVMChainId = !isNaN(parseInt(chainId));
+    const chainIdentifier = ChainIdHelper.parse(
+      isEVMChainId ? `eip155:${chainId}` : chainId
+    );
 
     return this.chainInfoMap.has(chainIdentifier.identifier);
   }

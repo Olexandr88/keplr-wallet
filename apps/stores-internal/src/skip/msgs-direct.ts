@@ -9,6 +9,7 @@ import { simpleFetch } from "@keplr-wallet/simple-fetch";
 import { computed, makeObservable } from "mobx";
 import { CoinPretty } from "@keplr-wallet/unit";
 import Joi from "joi";
+import { DenomHelper } from "@keplr-wallet/common";
 
 const Schema = Joi.object<MsgsDirectResponse>({
   msgs: Joi.array()
@@ -18,6 +19,16 @@ const Schema = Joi.object<MsgsDirectResponse>({
         path: Joi.array().items(Joi.string()).required(),
         msg: Joi.string().required(),
         msg_type_url: Joi.string().required(),
+      }).unknown(true),
+      Joi.object({
+        evm_tx: Joi.object({
+          chain_id: Joi.string().required(),
+          data: Joi.string().required(),
+          required_erc20_approvals: Joi.array().items(Joi.string()),
+          signer_address: Joi.string().required(),
+          to: Joi.string().required(),
+          value: Joi.string().required(),
+        }).unknown(true),
       }).unknown(true)
     )
     .required(),
@@ -42,7 +53,7 @@ export class ObservableQueryMsgsDirectInner extends ObservableQuery<MsgsDirectRe
       readonly chainId: string;
     }
   ) {
-    super(sharedContext, skipURL, "/v1/fungible/msgs_direct");
+    super(sharedContext, skipURL, "/v2/fungible/msgs_direct");
 
     makeObservable(this);
   }
@@ -65,6 +76,13 @@ export class ObservableQueryMsgsDirectInner extends ObservableQuery<MsgsDirectRe
         contract: string;
         msg: object;
       }
+    | {
+        type: "EvmTx";
+        evmChainId: string;
+        data: string;
+        to: string;
+        value: string;
+      }
     | undefined {
     if (!this.response) {
       return;
@@ -79,53 +97,66 @@ export class ObservableQueryMsgsDirectInner extends ObservableQuery<MsgsDirectRe
     }
 
     const msg = this.response.data.msgs[0];
-    if (
-      msg.msg_type_url !== "/ibc.applications.transfer.v1.MsgTransfer" &&
-      msg.msg_type_url !== "/cosmwasm.wasm.v1.MsgExecuteContract"
-    ) {
-      return;
-    }
 
-    const chainMsg = JSON.parse(msg.msg);
-    if (msg.msg_type_url === "/cosmwasm.wasm.v1.MsgExecuteContract") {
+    if ("evm_tx" in msg) {
       return {
-        type: "MsgExecuteContract",
-        funds: chainMsg.funds.map((fund: { denom: string; amount: string }) => {
-          return new CoinPretty(
-            this.chainGetter
-              .getChain(msg.chain_id)
-              .forceFindCurrency(fund.denom),
-            fund.amount
-          );
-        }),
-        contract: chainMsg.contract,
-        msg: chainMsg.msg,
+        type: "EvmTx",
+        evmChainId: msg.evm_tx.chain_id,
+        data: msg.evm_tx.data,
+        to: msg.evm_tx.to,
+        value: msg.evm_tx.value,
       };
-    } else if (
-      msg.msg_type_url === "/ibc.applications.transfer.v1.MsgTransfer"
-    ) {
-      if (msg.path.length < 2) {
+    } else {
+      if (
+        msg.msg_type_url !== "/ibc.applications.transfer.v1.MsgTransfer" &&
+        msg.msg_type_url !== "/cosmwasm.wasm.v1.MsgExecuteContract"
+      ) {
         return;
       }
 
-      return {
-        type: "MsgTransfer",
-        receiver: chainMsg.receiver,
-        sourcePort: chainMsg.source_port,
-        sourceChannel: chainMsg.source_channel,
-        counterpartyChainId: msg.path[1],
-        timeoutTimestamp: chainMsg.timeout_timestamp,
-        token: new CoinPretty(
-          this.chainGetter
-            .getChain(msg.chain_id)
-            .forceFindCurrency(chainMsg.token.denom),
-          chainMsg.token.amount
-        ),
-        memo: chainMsg.memo,
-      };
-    }
+      const chainMsg = JSON.parse(msg.msg);
+      if (msg.msg_type_url === "/cosmwasm.wasm.v1.MsgExecuteContract") {
+        return {
+          type: "MsgExecuteContract",
+          funds: chainMsg.funds.map(
+            (fund: { denom: string; amount: string }) => {
+              return new CoinPretty(
+                this.chainGetter
+                  .getChain(msg.chain_id)
+                  .forceFindCurrency(fund.denom),
+                fund.amount
+              );
+            }
+          ),
+          contract: chainMsg.contract,
+          msg: chainMsg.msg,
+        };
+      } else if (
+        msg.msg_type_url === "/ibc.applications.transfer.v1.MsgTransfer"
+      ) {
+        if (msg.path.length < 2) {
+          return;
+        }
 
-    throw new Error("Unknown error");
+        return {
+          type: "MsgTransfer",
+          receiver: chainMsg.receiver,
+          sourcePort: chainMsg.source_port,
+          sourceChannel: chainMsg.source_channel,
+          counterpartyChainId: msg.path[1],
+          timeoutTimestamp: chainMsg.timeout_timestamp,
+          token: new CoinPretty(
+            this.chainGetter
+              .getChain(msg.chain_id)
+              .forceFindCurrency(chainMsg.token.denom),
+            chainMsg.token.amount
+          ),
+          memo: chainMsg.memo,
+        };
+      }
+
+      throw new Error("Unknown error");
+    }
   }
 
   getMsgOrThrow():
@@ -143,6 +174,13 @@ export class ObservableQueryMsgsDirectInner extends ObservableQuery<MsgsDirectRe
         funds: CoinPretty[];
         contract: string;
         msg: object;
+      }
+    | {
+        type: "EvmTx";
+        evmChainId: string;
+        data: string;
+        to: string;
+        value: string;
       } {
     if (!this.response) {
       throw new Error("Response is empty");
@@ -167,6 +205,16 @@ export class ObservableQueryMsgsDirectInner extends ObservableQuery<MsgsDirectRe
   protected override async fetchResponse(
     abortController: AbortController
   ): Promise<{ headers: any; data: MsgsDirectResponse }> {
+    const sourceChainInfo = this.chainGetter.getChain(this.sourceAssetChainId);
+    const isSourceChainEvmOnly =
+      this.sourceAssetChainId.startsWith("eip155:") &&
+      sourceChainInfo.evm != null;
+    const sourceDenomHelper = new DenomHelper(this.amountInDenom);
+    const destChainInfo = this.chainGetter.getChain(this.destAssetChainId);
+    const isDestChainEvmOnly =
+      this.destAssetChainId.startsWith("eip155:") && destChainInfo.evm != null;
+    const destDenomHelper = new DenomHelper(this.destAssetDenom);
+
     const result = await simpleFetch<MsgsDirectResponse>(
       this.baseURL,
       this.url,
@@ -176,10 +224,20 @@ export class ObservableQueryMsgsDirectInner extends ObservableQuery<MsgsDirectRe
           "content-type": "application/json",
         },
         body: JSON.stringify({
-          source_asset_denom: this.amountInDenom,
-          source_asset_chain_id: this.sourceAssetChainId,
-          dest_asset_denom: this.destAssetDenom,
-          dest_asset_chain_id: this.destAssetChainId,
+          source_asset_denom:
+            sourceDenomHelper.type === "erc20"
+              ? sourceDenomHelper.contractAddress
+              : this.amountInDenom,
+          source_asset_chain_id: isSourceChainEvmOnly
+            ? this.sourceAssetChainId.replace("eip155:", "")
+            : this.sourceAssetChainId,
+          dest_asset_denom:
+            destDenomHelper.type === "erc20"
+              ? destDenomHelper.contractAddress
+              : this.destAssetDenom,
+          dest_asset_chain_id: isDestChainEvmOnly
+            ? this.destAssetChainId.replace("eip155:", "")
+            : this.destAssetChainId,
           amount_in: this.amountInAmount,
           chain_ids_to_addresses: this.chainIdsToAddresses,
           slippage_tolerance_percent: this.slippageTolerancePercent.toString(),
@@ -192,10 +250,19 @@ export class ObservableQueryMsgsDirectInner extends ObservableQuery<MsgsDirectRe
                   },
                 ]
               : [],
-          swap_venue: {
-            name: this.swapVenue.name,
-            chain_id: this.swapVenue.chainId,
-          },
+          ...((isSourceChainEvmOnly || isDestChainEvmOnly) && {
+            smart_swap_options: {
+              evm_swaps: true,
+            },
+          }),
+          ...(!isSourceChainEvmOnly &&
+            !isDestChainEvmOnly &&
+            this.swapVenue != null && {
+              swap_venue: {
+                name: this.swapVenue.name,
+                chain_id: this.swapVenue.chainId,
+              },
+            }),
         }),
         signal: abortController.signal,
       }
@@ -203,10 +270,7 @@ export class ObservableQueryMsgsDirectInner extends ObservableQuery<MsgsDirectRe
 
     const validated = Schema.validate(result.data);
     if (validated.error) {
-      console.log(
-        "Failed to validate assets from source response",
-        validated.error
-      );
+      console.log("Failed to validate msgs direct response", validated.error);
       throw validated.error;
     }
 
